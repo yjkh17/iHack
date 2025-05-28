@@ -1,18 +1,6 @@
-//
-//  FileNavigatorView.swift
-//  iHack
-//
-//  Created by Yousef Jawdat on 28/05/2025.
-//
-
 import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
-
-// Function to get file icon from system
-func getFileIcon(for url: URL) -> NSImage? {
-    return NSWorkspace.shared.icon(forFile: url.path)
-}
 
 // File type detection functions
 
@@ -41,6 +29,14 @@ func getFileTypeExtension(for url: URL) -> String {
                 return "exec"
             case "public.unix-executable":
                 return "unix"
+            case "com.apple.applescript.script":
+                return "scpt"
+            case "public.utf8-plain-text":
+                // Check if it's actually a strings file
+                if url.pathExtension.lowercased() == "strings" {
+                    return "strings"
+                }
+                return "txt"
             default:
                 break
             }
@@ -82,6 +78,10 @@ func getFileExtension(from fileName: String) -> String {
     if fileName == "CodeResources" { return "xml" }
     if fileName.hasPrefix("._") { return "resource" }
     if lowercaseFileName.contains("executable") { return "exec" }
+    
+    // Check for strings and script files
+    if fileName.hasSuffix(".strings") { return "strings" }
+    if fileName.hasSuffix(".scpt") { return "scpt" }
     
     // For .app bundles and other known types
     if fileName.hasSuffix(".app") { return "app" }
@@ -137,16 +137,10 @@ struct XcodeFileRowView: View {
             }
             
             // File icon
-            if let icon = getFileIcon(for: item.url) {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 16, height: 16)
-            } else {
-                Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
-                    .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
-                    .font(.system(size: 14))
-                    .frame(width: 16, height: 16)
-            }
+            let icon = NSWorkspace.shared.icon(forFile: item.url.path)
+            Image(nsImage: icon)
+                .resizable()
+                .frame(width: 16, height: 16)
             
             // File name
             Text(item.name)
@@ -175,7 +169,7 @@ struct XcodeFileRowView: View {
                     item.isExpanded.toggle()
                     print("Tapped \(item.name), isExpanded now: \(item.isExpanded)")
                 }
-            } else if item.isPlist {
+            } else {
                 onSelect(item)
             }
         }

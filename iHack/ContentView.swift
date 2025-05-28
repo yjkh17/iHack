@@ -9,9 +9,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+// Function to get file icon from system
+func getFileIcon(for url: URL) -> NSImage? {
+    return NSWorkspace.shared.icon(forFile: url.path)
+}
+
 struct ContentView: View {
     @State private var selectedFileURL: URL?
     @State private var plistData: [String: Any] = [:]
+    @State private var fileContent: String = ""
+    @State private var currentFileType: FileType = .other
     @State private var showingFilePicker = false
     @State private var statusMessage = "Select an app to browse its contents"
     @State private var isModified = false
@@ -58,9 +65,7 @@ struct ContentView: View {
                                         item: item,
                                         selectedURL: selectedFileURL,
                                         onSelect: { selectedItem in
-                                            if selectedItem.isPlist {
-                                                loadPlistFile(from: selectedItem.url)
-                                            }
+                                            loadFile(from: selectedItem.url, fileType: selectedItem.fileType)
                                         }
                                     )
                                     .onReceive(item.objectWillChange) { _ in
@@ -119,7 +124,7 @@ struct ContentView: View {
                             .fill(.separator)
                             .frame(height: 0.5)
                         
-                        if plistData.isEmpty {
+                        if plistData.isEmpty && fileContent.isEmpty && currentFileType == .other {
                             VStack(spacing: 20) {
                                 Image(systemName: "doc.text")
                                     .font(.system(size: 48))
@@ -129,14 +134,17 @@ struct ContentView: View {
                                     .font(.title2)
                                     .foregroundColor(.secondary)
                                 
-                                Text("Select a plist file from the navigator")
+                                Text("Select a file from the navigator")
                                     .foregroundColor(.secondary)
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
-                            XcodePlistTableView(
-                                data: $plistData,
+                            FileViewerView(
+                                selectedFileURL: $selectedFileURL,
+                                fileContent: $fileContent,
+                                plistData: $plistData,
                                 isModified: $isModified,
+                                fileType: currentFileType,
                                 onSave: saveFile,
                                 onRestore: restoreFromBackup
                             )
@@ -181,11 +189,9 @@ struct ContentView: View {
                                 AppContentRowView(
                                     item: item,
                                     onSelect: { selectedItem in
-                                        if selectedItem.isPlist {
-                                            loadPlistFile(from: selectedItem.url)
-                                            showingEditor = true
-                                            showingAppBrowser = false
-                                        }
+                                        loadFile(from: selectedItem.url, fileType: selectedItem.fileType)
+                                        showingEditor = true
+                                        showingAppBrowser = false
                                     }
                                 )
                             }
@@ -469,10 +475,162 @@ struct ContentView: View {
         }
     }
     
+    func loadFile(from url: URL, fileType: FileType) {
+        selectedFileURL = url
+        currentFileType = fileType
+        
+        print("Loading file: \(url.lastPathComponent), type: \(fileType)")
+        
+        switch fileType {
+        case .plist:
+            loadPlistFile(from: url)
+        case .json, .text:
+            loadTextFile(from: url)
+        case .icon:
+            // Icon files are handled by IconViewerView
+            plistData = [:]
+            fileContent = ""
+            statusMessage = "Loaded icon: \(url.lastPathComponent)"
+            isModified = false
+        case .other:
+            plistData = [:]
+            fileContent = ""
+            statusMessage = "Unsupported file type: \(url.lastPathComponent)"
+            isModified = false
+        }
+    }
+    
+    func loadTextFile(from url: URL) {
+        do {
+            // Try UTF-8 first
+            let content = try String(contentsOf: url, encoding: .utf8)
+            fileContent = content
+            plistData = [:]
+            statusMessage = "Loaded \(url.lastPathComponent)"
+            isModified = false
+        } catch {
+            // If UTF-8 fails, try other common encodings
+            do {
+                let content = try String(contentsOf: url, encoding: .utf16)
+                fileContent = content
+                plistData = [:]
+                statusMessage = "Loaded \(url.lastPathComponent) (UTF-16)"
+                isModified = false
+            } catch {
+                do {
+                    let content = try String(contentsOf: url, encoding: .ascii)
+                    fileContent = content
+                    plistData = [:]
+                    statusMessage = "Loaded \(url.lastPathComponent) (ASCII)"
+                    isModified = false
+                } catch {
+                    // If all encodings fail, try to read as raw data and show info
+                    do {
+                        let data = try Data(contentsOf: url)
+                        if data.isEmpty {
+                            fileContent = "[Empty file]"
+                            statusMessage = "File is empty: \(url.lastPathComponent)"
+                        } else {
+                            let fileName = url.lastPathComponent
+                            // Handle different binary file types
+                            if fileName == "PkgInfo" {
+                                // PkgInfo files contain the app type and creator code
+                                let dataString = data.map { String(format: "%02x", $0) }.joined(separator: " ")
+                                let readableString = String(data: data, encoding: .ascii) ?? "[Binary data]"
+                                fileContent = "[PkgInfo File - App Bundle Info]\n\nContent: \(readableString)\nHex: \(dataString)\n\nThis file contains the application type and creator code for the macOS app bundle."
+                                statusMessage = "Loaded PkgInfo: \(url.lastPathComponent)"
+                            } else if fileName == "CodeResources" {
+                                fileContent = "[CodeResources File - Code Signing]\n\nFile size: \(data.count) bytes\n\nThis file contains code signing information and resource hashes for the app bundle."
+                                statusMessage = "Loaded CodeResources: \(url.lastPathComponent)"
+                            } else if url.pathExtension.lowercased() == "scpt" {
+                                fileContent = "[Compiled AppleScript - Binary Format]\n\nFile size: \(data.count) bytes\n\nThis is a compiled AppleScript file. To view the source code, you would need to open it in Script Editor."
+                                statusMessage = "Loaded compiled AppleScript: \(url.lastPathComponent)"
+                            } else if url.pathExtension.lowercased() == "provisionprofile" {
+                                // Provisioning profiles are often CMS-wrapped XML/plist data
+                                // Try to extract readable XML content
+                                if let dataString = String(data: data, encoding: .utf8) {
+                                    fileContent = dataString
+                                    statusMessage = "Loaded provisioning profile: \(url.lastPathComponent)"
+                                } else {
+                                    // Look for XML patterns in the binary data
+                                    let dataString = String(data: data, encoding: .ascii) ?? ""
+                                    if dataString.contains("<?xml") || dataString.contains("<plist") {
+                                        // Try to extract XML portion
+                                        if let xmlStart = dataString.range(of: "<?xml"),
+                                           let xmlEnd = dataString.range(of: "</plist>") {
+                                            let xmlContent = String(dataString[xmlStart.lowerBound...xmlEnd.upperBound])
+                                            fileContent = "[Provisioning Profile - Extracted XML]\n\n\(xmlContent)"
+                                            statusMessage = "Extracted XML from provisioning profile: \(url.lastPathComponent)"
+                                        } else {
+                                            fileContent = "[Provisioning Profile - CMS Format]\n\nFile size: \(data.count) bytes\n\nThis provisioning profile is in CMS (Cryptographic Message Syntax) format. It contains signing certificates, entitlements, and device information but is cryptographically wrapped.\n\nTo view the content, you can use:\n- security cms -D -i \"\(url.path)\"\n- or open in Xcode"
+                                            statusMessage = "CMS provisioning profile: \(url.lastPathComponent)"
+                                        }
+                                    } else {
+                                        fileContent = "[Provisioning Profile - Binary Format]\n\nFile size: \(data.count) bytes\n\nThis provisioning profile contains binary data in CMS format.\n\nTo decode, use: security cms -D -i \"\(url.path)\""
+                                        statusMessage = "Binary provisioning profile: \(url.lastPathComponent)"
+                                    }
+                                }
+                            } else {
+                                fileContent = "[Binary or unsupported text encoding]\n\nFile size: \(data.count) bytes\n\nThis file may be in binary format or use an unsupported text encoding."
+                                statusMessage = "Binary file detected: \(url.lastPathComponent)"
+                            }
+                        }
+                        plistData = [:]
+                        isModified = false
+                    } catch {
+                        statusMessage = "Error loading file: \(error.localizedDescription)"
+                        fileContent = "[Error: Cannot read file - \(error.localizedDescription)]"
+                        plistData = [:]
+                        isModified = false
+                    }
+                }
+            }
+        }
+    }
+    
     func saveFile() {
         guard let url = selectedFileURL else { return }
         
-        print("Attempting to save file at: \(url.path)")
+        switch currentFileType {
+        case .plist:
+            savePlistFile(to: url)
+        case .json, .text:
+            saveTextFile(to: url)
+        case .icon, .other:
+            statusMessage = "Cannot save this file type"
+        }
+    }
+    
+    func saveTextFile(to url: URL) {
+        print("Attempting to save text file at: \(url.path)")
+        
+        let fileManager = FileManager.default
+        
+        // Create backup first
+        let backupURL = url.appendingPathExtension("backup")
+        do {
+            if fileManager.fileExists(atPath: backupURL.path) {
+                try fileManager.removeItem(at: backupURL)
+            }
+            try fileManager.copyItem(at: url, to: backupURL)
+            print("Backup created at: \(backupURL.path)")
+        } catch {
+            print("Backup creation failed: \(error.localizedDescription)")
+        }
+        
+        do {
+            try fileContent.write(to: url, atomically: true, encoding: .utf8)
+            statusMessage = "Saved successfully to \(url.lastPathComponent)"
+            isModified = false
+            print("Successfully saved text file to: \(url.path)")
+        } catch {
+            statusMessage = "Save error: \(error.localizedDescription)"
+            print("Save error: \(error)")
+        }
+    }
+    
+    func savePlistFile(to url: URL) {
+        print("Attempting to save plist file at: \(url.path)")
         
         let fileManager = FileManager.default
         do {
@@ -573,10 +731,6 @@ struct ContentView: View {
             statusMessage = "Restore failed: \(error.localizedDescription)"
             print("Restore error: \(error)")
         }
-    }
-    
-    func getFileIcon(for url: URL) -> NSImage? {
-        return NSWorkspace.shared.icon(forFile: url.path)
     }
     
     func getFileType(for url: URL) -> String {
