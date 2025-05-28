@@ -6,5 +6,11 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- ADD: Write access for selected files -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<!-- ADD: Downloads folder access -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
 </dict>
 </plist>
