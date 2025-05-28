@@ -176,5 +176,28 @@ struct XcodeFileRowView: View {
         .onHover { hovering in
             isHovered = hovering
         }
+        .contextMenu {
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([item.url])
+            }
+            
+            Button("Copy Path") {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(item.url.path, forType: .string)
+            }
+            
+            Button("Copy Name") {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(item.name, forType: .string)
+            }
+            
+            Divider()
+            
+            Button("Open with Default App") {
+                NSWorkspace.shared.open(item.url)
+            }
+        }
     }
 }
