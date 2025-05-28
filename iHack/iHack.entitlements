@@ -2,15 +2,30 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
+	<!-- REMOVE: App sandbox to allow full system access -->
+	<!-- <key>com.apple.security.app-sandbox</key>
+	<true/> -->
+	
+	<!-- REMOVE: These are only needed with sandbox enabled -->
+	<!-- <key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
-	<key>com.apple.security.files.user-selected.read-only</key>
-	<true/>
-	<!-- ADD: Write access for selected files -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
-	<!-- ADD: Downloads folder access -->
 	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+	<key>com.apple.security.files.all</key>
+	<true/> -->
+	
+	<!-- ADD: Disable library validation to allow system modifications -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	
+	<!-- ADD: Allow unsigned executable memory -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	
+	<!-- ADD: Disable hardened runtime -->
+	<key>com.apple.security.cs.disable-executable-page-protection</key>
 	<true/>
 </dict>
 </plist>

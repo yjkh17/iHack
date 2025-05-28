@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var showingAppBrowser = false
     @State private var selectedApp: AppBundle?
     @State private var appContents: [AppContentItem] = []
+    @State private var refreshTrigger = false
 
     var body: some View {
         Group {
@@ -32,7 +33,7 @@ struct ContentView: View {
                             Button("← Apps") {
                                 withAnimation(.easeInOut(duration: 0.3)) {
                                     showingEditor = false
-                                    showingAppBrowser = true
+                                    showingAppBrowser = false
                                 }
                             }
                             .buttonStyle(.borderless)
@@ -62,9 +63,13 @@ struct ContentView: View {
                                             }
                                         }
                                     )
+                                    .onReceive(item.objectWillChange) { _ in
+                                        refreshTrigger.toggle()
+                                    }
                                 }
                             }
                             .padding(.vertical, 8)
+                            .id(refreshTrigger)
                         }
                     }
                     .frame(minWidth: 250)
@@ -132,7 +137,8 @@ struct ContentView: View {
                             XcodePlistTableView(
                                 data: $plistData,
                                 isModified: $isModified,
-                                onSave: saveFile
+                                onSave: saveFile,
+                                onRestore: restoreFromBackup
                             )
                         }
                     }
@@ -142,16 +148,6 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     VStack(spacing: 0) {
                         HStack {
-                            Button("← Apps") {
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    showingAppBrowser = false
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.green)
-
-                            Spacer()
-
                             if let app = selectedApp {
                                 HStack(spacing: 12) {
                                     if let icon = app.icon {
@@ -310,11 +306,13 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Helper Functions
+    
     func loadAppContents(for app: AppBundle) {
         selectedApp = app
         appContents = []
 
-        let contentsURL = URL(fileURLWithPath: app.path).appendingPathComponent("Contents")
+        let appBundleURL = URL(fileURLWithPath: app.path)
 
         func scanDirectory(_ url: URL, depth: Int = 0) -> [AppContentItem] {
             var items: [AppContentItem] = []
@@ -323,7 +321,18 @@ struct ContentView: View {
                 return items
             }
 
-            for itemURL in contents.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            for itemURL in contents.sorted(by: { url1, url2 in
+                let isDir1 = (try? url1.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                let isDir2 = (try? url2.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                
+                if isDir1 && !isDir2 {
+                    return true  // Directory comes before file
+                } else if !isDir1 && isDir2 {
+                    return false // File comes after directory
+                } else {
+                    return url1.lastPathComponent.localizedCaseInsensitiveCompare(url2.lastPathComponent) == .orderedAscending
+                }
+            }) {
                 let isDirectory = (try? itemURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
 
                 let item = AppContentItem(
@@ -334,7 +343,7 @@ struct ContentView: View {
                     depth: depth
                 )
                 
-                if isDirectory && depth < 3 {
+                if isDirectory && depth < 4 {
                     item.children = scanDirectory(itemURL, depth: depth + 1)
                 }
                 
@@ -344,7 +353,7 @@ struct ContentView: View {
             return items
         }
 
-        appContents = scanDirectory(contentsURL)
+        appContents = scanDirectory(appBundleURL)
         statusMessage = "Loaded \(countAllItems(appContents)) items from \(app.name)"
     }
     
@@ -361,11 +370,15 @@ struct ContentView: View {
         
         for item in items {
             result.append(item)
+            print("Adding item: \(item.name), isExpanded: \(item.isExpanded), children: \(item.children.count)")
             if item.isDirectory && item.isExpanded {
-                result.append(contentsOf: getFlattenedItems(item.children))
+                let childItems = getFlattenedItems(item.children)
+                result.append(contentsOf: childItems)
+                print("Added \(childItems.count) children for \(item.name)")
             }
         }
         
+        print("Total flattened items: \(result.count)")
         return result
     }
 
@@ -459,321 +472,112 @@ struct ContentView: View {
     func saveFile() {
         guard let url = selectedFileURL else { return }
         
+        print("Attempting to save file at: \(url.path)")
+        
+        let fileManager = FileManager.default
         do {
-            let data = try PropertyListSerialization.data(
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            print("Current file attributes: \(attributes)")
+        } catch {
+            print("Failed to get file attributes: \(error)")
+        }
+        
+        let parentDir = url.deletingLastPathComponent()
+        do {
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parentDir.path)
+            print("Made directory writable: \(parentDir.path)")
+        } catch {
+            print("Failed to make directory writable: \(error)")
+        }
+        
+        let backupURL = url.appendingPathExtension("backup")
+        do {
+            if fileManager.fileExists(atPath: backupURL.path) {
+                try fileManager.removeItem(at: backupURL)
+            }
+            try fileManager.copyItem(at: url, to: backupURL)
+            print("Backup created at: \(backupURL.path)")
+        } catch {
+            print("Backup creation failed: \(error.localizedDescription)")
+        }
+        
+        let data: Data
+        do {
+            data = try PropertyListSerialization.data(
                 fromPropertyList: plistData,
                 format: .xml,
                 options: 0
             )
-            try data.write(to: url)
-            statusMessage = "Saved successfully"
-            isModified = false
         } catch {
-            statusMessage = "Save error: \(error.localizedDescription)"
+            statusMessage = "Serialization error: \(error.localizedDescription)"
+            print("Serialization error: \(error)")
+            return
+        }
+        
+        do {
+            if !fileManager.isWritableFile(atPath: url.path) {
+                try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+                print("Made file writable: \(url.path)")
+            }
+            
+            try data.write(to: url)
+            statusMessage = "Saved successfully to \(url.lastPathComponent)"
+            isModified = false
+            print("Successfully saved to: \(url.path)")
+            
+        } catch {
+            print("Direct save failed: \(error)")
+            
+            do {
+                let tempURL = url.appendingPathExtension("tmp")
+                try data.write(to: tempURL)
+                
+                try fileManager.removeItem(at: url)
+                try fileManager.moveItem(at: tempURL, to: url)
+                
+                statusMessage = "Saved successfully to \(url.lastPathComponent) (via temp file)"
+                isModified = false
+                print("Successfully saved via temp file to: \(url.path)")
+                
+            } catch {
+                statusMessage = "Save error: \(error.localizedDescription)"
+                print("Save error (both methods failed): \(error)")
+            }
         }
     }
+    
+    func restoreFromBackup() {
+        guard let url = selectedFileURL else { return }
+        
+        let backupURL = url.appendingPathExtension("backup")
+        
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            statusMessage = "No backup file found for \(url.lastPathComponent)"
+            return
+        }
+        
+        do {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+                try FileManager.default.removeItem(at: url)
+            }
+            
+            try FileManager.default.copyItem(at: backupURL, to: url)
+            
+            loadPlistFile(from: url)
+            
+            statusMessage = "Successfully restored from backup"
+            print("Restored from backup: \(backupURL.path) -> \(url.path)")
+            
+        } catch {
+            statusMessage = "Restore failed: \(error.localizedDescription)"
+            print("Restore error: \(error)")
+        }
+    }
+    
 }
 
-class AppContentItem: Identifiable, ObservableObject {
-    let id = UUID()
-    let name: String
-    let url: URL
-    let isDirectory: Bool
-    let isPlist: Bool
-    let depth: Int
-    @Published var isExpanded: Bool = false
-    var children: [AppContentItem] = []
-    
-    init(name: String, url: URL, isDirectory: Bool, isPlist: Bool, depth: Int) {
-        self.name = name
-        self.url = url
-        self.isDirectory = isDirectory
-        self.isPlist = isPlist
-        self.depth = depth
-    }
-}
-
-struct XcodeFileRowView: View {
-    @ObservedObject var item: AppContentItem
-    let selectedURL: URL?
-    let onSelect: (AppContentItem) -> Void
-    @State private var isHovered = false
-    
-    var isSelected: Bool {
-        selectedURL == item.url
-    }
-    
-    var body: some View {
-        HStack(spacing: 4) {
-            // Indentation
-            HStack(spacing: 0) {
-                ForEach(0..<item.depth, id: \.self) { _ in
-                    Rectangle()
-                        .fill(.clear)
-                        .frame(width: 16)
-                }
-            }
-            
-            // Disclosure triangle
-            if item.isDirectory && !item.children.isEmpty {
-                Button(action: {
-                    item.isExpanded.toggle()
-                }) {
-                    Image(systemName: item.isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .frame(width: 12, height: 12)
-                }
-                .buttonStyle(.plain)
-            } else {
-                Rectangle()
-                    .fill(.clear)
-                    .frame(width: 12, height: 12)
-            }
-            
-            // File icon
-            Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
-                .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
-                .font(.system(size: 14))
-                .frame(width: 16)
-            
-            // File name
-            Text(item.name)
-                .font(.system(size: 13))
-                .foregroundColor(isSelected ? .white : .primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            
-            Spacer()
-        }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 8)
-        .background(isSelected ? .blue : (isHovered ? .gray.opacity(0.2) : .clear))
-        .cornerRadius(4)
-        .onTapGesture {
-            if !item.isDirectory {
-                onSelect(item)
-            }
-        }
-        .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-}
-
-struct XcodePlistTableView: View {
-    @Binding var data: [String: Any]
-    @Binding var isModified: Bool
-    let onSave: () -> Void
-    @State private var searchText = ""
-    
-    var filteredKeys: [String] {
-        let keys = Array(data.keys).sorted()
-        if searchText.isEmpty {
-            return keys
-        }
-        return keys.filter { $0.localizedCaseInsensitiveContains(searchText) }
-    }
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Key")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .frame(minWidth: 200, alignment: .leading)
-                
-                Text("Type")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .frame(minWidth: 80, alignment: .leading)
-                
-                Text("Value")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                
-                Text("")
-                    .frame(width: 100)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.gray.opacity(0.1))
-            
-            Rectangle()
-                .fill(.separator)
-                .frame(height: 0.5)
-            
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(filteredKeys, id: \.self) { key in
-                        XcodePlistRowView(
-                            key: key,
-                            value: data[key] ?? "",
-                            onValueChange: { newValue in
-                                data[key] = newValue
-                                isModified = true
-                            },
-                            onDelete: {
-                                data.removeValue(forKey: key)
-                                isModified = true
-                            }
-                        )
-                        
-                        Rectangle()
-                            .fill(.separator.opacity(0.5))
-                            .frame(height: 0.5)
-                    }
-                }
-            }
-            
-            HStack {
-                Button("Save") {
-                    onSave()
-                }
-                .buttonStyle(.bordered)
-                .disabled(!isModified)
-                
-                Spacer()
-                
-                Text("\(filteredKeys.count) items")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.gray.opacity(0.05))
-        }
-    }
-}
-
-struct XcodePlistRowView: View {
-    let key: String
-    let value: Any
-    let onValueChange: (Any) -> Void
-    let onDelete: () -> Void
-    
-    @State private var editingValue = ""
-    @State private var isEditing = false
-    @State private var isHovered = false
-    
-    var valueType: String {
-        if value is String { return "String" }
-        if value is NSNumber { return "Number" }
-        if value is Bool { return "Boolean" }
-        if value is [Any] { return "Array" }
-        if value is [String: Any] { return "Dictionary" }
-        return "Unknown"
-    }
-    
-    var body: some View {
-        HStack {
-            Text(key)
-                .font(.system(size: 13))
-                .foregroundColor(.primary)
-                .frame(minWidth: 200, alignment: .leading)
-            
-            Text(valueType)
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-                .frame(minWidth: 80, alignment: .leading)
-            
-            if isEditing {
-                TextField("Value", text: $editingValue)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13))
-                    .onSubmit {
-                        commitEdit()
-                    }
-            } else {
-                Text(stringValue(from: value))
-                    .font(.system(size: 13))
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .onTapGesture {
-                        if !(value is [Any]) && !(value is [String: Any]) {
-                            startEditing()
-                        }
-                    }
-            }
-            
-            HStack(spacing: 4) {
-                if isEditing {
-                    Button("Save") {
-                        commitEdit()
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    
-                    Button("Cancel") {
-                        cancelEdit()
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                } else {
-                    Button("Edit") {
-                        startEditing()
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(value is [Any] || value is [String: Any])
-                }
-                
-                Button("Delete") {
-                    onDelete()
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .foregroundColor(.red)
-            }
-            .frame(width: 100)
-            .opacity(isHovered ? 1 : 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(isHovered ? .gray.opacity(0.1) : .clear)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-    
-    func stringValue(from value: Any) -> String {
-        if let string = value as? String {
-            return string
-        } else if let number = value as? NSNumber {
-            return number.stringValue
-        } else if let bool = value as? Bool {
-            return bool ? "YES" : "NO"
-        } else if let array = value as? [Any] {
-            return "(\(array.count) items)"
-        } else if let dict = value as? [String: Any] {
-            return "(\(dict.keys.count) items)"
-        }
-        return "\(value)"
-    }
-    
-    func startEditing() {
-        editingValue = stringValue(from: value)
-        isEditing = true
-    }
-    
-    func commitEdit() {
-        if let number = Double(editingValue) {
-            onValueChange(number)
-        } else if editingValue.lowercased() == "yes" || editingValue.lowercased() == "true" {
-            onValueChange(true)
-        } else if editingValue.lowercased() == "no" || editingValue.lowercased() == "false" {
-            onValueChange(false)
-        } else {
-            onValueChange(editingValue)
-        }
-        isEditing = false
-    }
-    
-    func cancelEdit() {
-        isEditing = false
-        editingValue = ""
-    }
-}
+// MARK: - Supporting Views
 
 struct AppContentRowView: View {
     let item: AppContentItem
@@ -800,307 +604,13 @@ struct AppContentRowView: View {
                 .controlSize(.small)
             }
         }
-        .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(isHovered ? .gray.opacity(0.1) : .clear)
         .cornerRadius(6)
         .onHover { hovering in
             isHovered = hovering
         }
-    }
-}
-
-struct PlistEditorView: View {
-    @Binding var data: [String: Any]
-    @Binding var isModified: Bool
-    let onSave: () -> Void
-    @Binding var searchText: String
-
-    var filteredKeys: [String] {
-        let keys = Array(data.keys).sorted()
-        if searchText.isEmpty {
-            return keys
-        }
-        return keys.filter { $0.localizedCaseInsensitiveContains(searchText) }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-
-                    TextField("Search keys...", text: $searchText)
-                        .textFieldStyle(.plain)
-
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.gray.opacity(0.2))
-                .cornerRadius(6)
-
-                Spacer()
-
-                Button("Save All Changes") {
-                    onSave()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(!isModified)
-            }
-            .padding(16)
-            .background(.black.opacity(0.8))
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(filteredKeys, id: \.self) { key in
-                        PlistRowView(
-                            key: key,
-                            value: data[key] ?? "",
-                            onValueChange: { newValue in
-                                data[key] = newValue
-                                isModified = true
-                            },
-                            onDelete: {
-                                data.removeValue(forKey: key)
-                                isModified = true
-                            }
-                        )
-                    }
-                }
-                .padding(16)
-            }
-        }
-    }
-}
-
-struct PlistRowView: View {
-    let key: String
-    let value: Any
-    let onValueChange: (Any) -> Void
-    let onDelete: () -> Void
-
-    @State private var editingValue = ""
-    @State private var isEditing = false
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Text(key)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(.green)
-                .frame(width: 220, alignment: .leading)
-                .fontWeight(.medium)
-
-            if isEditing {
-                TextField("Value", text: $editingValue)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        commitEdit()
-                    }
-            } else {
-                Text(stringValue(from: value))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .onTapGesture {
-                        startEditing()
-                    }
-            }
-
-            HStack(spacing: 8) {
-                if isEditing {
-                    Button("Save") {
-                        commitEdit()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.green)
-                    .controlSize(.small)
-
-                    Button("Cancel") {
-                        cancelEdit()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else {
-                    Button("Edit") {
-                        startEditing()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.blue)
-                    .controlSize(.small)
-                }
-
-                Button("Delete") {
-                    onDelete()
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .controlSize(.small)
-            }
-        }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 16)
-        .background(isHovered ? .gray.opacity(0.1) : .clear)
-        .overlay(
-            Rectangle()
-                .fill(.gray.opacity(0.2))
-                .frame(height: 1),
-            alignment: .bottom
-        )
-        .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-
-    func stringValue(from value: Any) -> String {
-        if let string = value as? String {
-            return string
-        } else if let number = value as? NSNumber {
-            return number.stringValue
-        } else if let bool = value as? Bool {
-            return bool ? "true" : "false"
-        } else if let array = value as? [Any] {
-            return "Array (\(array.count) items)"
-        } else if let dict = value as? [String: Any] {
-            return "Dictionary (\(dict.keys.count) keys)"
-        }
-        return "\(value)"
-    }
-
-    func startEditing() {
-        editingValue = stringValue(from: value)
-        isEditing = true
-    }
-
-    func commitEdit() {
-        if let number = Double(editingValue) {
-            onValueChange(number)
-        } else if editingValue.lowercased() == "true" {
-            onValueChange(true)
-        } else if editingValue.lowercased() == "false" {
-            onValueChange(false)
-        } else {
-            onValueChange(editingValue)
-        }
-        isEditing = false
-    }
-
-    func cancelEdit() {
-        isEditing = false
-        editingValue = ""
-    }
-}
-
-struct AppBundle: Identifiable {
-    let id = UUID()
-    let name: String
-    let path: String
-    let infoPlistPath: String
-    let icon: NSImage?
-
-    init(name: String, path: String, infoPlistPath: String) {
-        self.name = name
-        self.path = path
-        self.infoPlistPath = infoPlistPath
-        self.icon = NSWorkspace.shared.icon(forFile: path)
-    }
-}
-
-struct QuickActionButton: View {
-    let title: String
-    let icon: String
-    let action: () -> Void
-    var disabled = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: icon)
-                    .foregroundColor(.green)
-                Text(title)
-                    .foregroundColor(.green)
-                Spacer()
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(.black)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(.green.opacity(disabled ? 0.3 : 1), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-    }
-}
-
-struct LaunchpadView: View {
-    let apps: [AppBundle]
-    let onSelectApp: (AppBundle) -> Void
-
-    let columns = Array(repeating: GridItem(.flexible(), spacing: 40), count: 7)
-
-    var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 40) {
-                ForEach(apps) { app in
-                    LaunchpadAppView(app: app, onSelect: { onSelectApp(app) })
-                }
-            }
-            .padding(40)
-        }
-    }
-}
-
-struct LaunchpadAppView: View {
-    let app: AppBundle
-    let onSelect: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Button(action: onSelect) {
-                VStack(spacing: 8) {
-                    if let icon = app.icon {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 80, height: 80)
-                            .cornerRadius(16)
-                            .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
-                            .scaleEffect(isHovered ? 1.05 : 1.0)
-                    } else {
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(.green.opacity(0.3))
-                            .frame(width: 80, height: 80)
-                            .overlay(
-                                Image(systemName: "app")
-                                    .font(.title)
-                                    .foregroundColor(.green)
-                            )
-                            .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
-                            .scaleEffect(isHovered ? 1.05 : 1.0)
-                    }
-
-                    Text(app.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .frame(width: 90)
-                }
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    isHovered = hovering
-                }
-            }
-        }
-        .frame(width: 90, height: 110)
     }
 }
 
