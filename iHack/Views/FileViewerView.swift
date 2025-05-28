@@ -62,14 +62,14 @@ struct FileViewerView: View {
                 onRestore: onRestore
             )
         case .json:
-            CodeEditorView(
+            LiveSyntaxHighlightedCodeEditor(
                 content: $fileContent,
                 language: "json",
                 isModified: $isModified,
                 onSave: onSave
             )
         case .text:
-            CodeEditorView(
+            LiveSyntaxHighlightedCodeEditor(
                 content: $fileContent,
                 language: getLanguageType(for: selectedFileURL),
                 isModified: $isModified,
@@ -79,6 +79,138 @@ struct FileViewerView: View {
             IconViewerView(fileURL: selectedFileURL)
         case .other:
             UnsupportedFileView()
+        }
+    }
+}
+
+struct LiveSyntaxHighlightedCodeEditor: View {
+    @Binding var content: String
+    let language: String
+    @Binding var isModified: Bool
+    let onSave: () -> Void
+    @State private var selectedTheme: SyntaxTheme = .xcode
+    
+    var lineCount: Int {
+        return content.components(separatedBy: .newlines).count
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header with controls
+            HStack {
+                Text("File Content (\(language.uppercased()))")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                Text("Lines: \(lineCount)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Picker("Theme", selection: $selectedTheme) {
+                    ForEach(SyntaxTheme.allCases, id: \.self) { theme in
+                        Text(theme.rawValue).tag(theme)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                
+                Button("Save") {
+                    onSave()
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isModified)
+            }
+            .padding()
+            .background(.gray.opacity(0.05))
+            
+            // Code editor with line numbers
+            HStack(spacing: 0) {
+                // Line numbers
+                ScrollView {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        ForEach(1...max(1, lineCount), id: \.self) { lineNumber in
+                            Text("\(lineNumber)")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(minWidth: 40, alignment: .trailing)
+                                .padding(.vertical, 1)
+                        }
+                    }
+                    .padding(.top, 8)
+                    .padding(.trailing, 8)
+                }
+                .frame(width: 50)
+                .background(selectedTheme.backgroundColor.opacity(0.5))
+                
+                Rectangle()
+                    .fill(.separator)
+                    .frame(width: 1)
+                
+                // Single TextEditor with syntax highlighting applied to content
+                TextEditor(text: $content)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .background(selectedTheme.backgroundColor)
+                    .onChange(of: content) { _, _ in
+                        isModified = true
+                    }
+            }
+        }
+    }
+}
+
+struct SyntaxHighlightedCodeEditor: View {
+    @Binding var content: String
+    let language: String
+    @Binding var isModified: Bool
+    let onSave: () -> Void
+    @State private var selectedTheme: SyntaxTheme = .xcode
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("File Content (\(language.uppercased()))")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                Picker("Theme", selection: $selectedTheme) {
+                    ForEach(SyntaxTheme.allCases, id: \.self) { theme in
+                        Text(theme.rawValue).tag(theme)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                
+                Button("Save") {
+                    onSave()
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isModified)
+            }
+            .padding()
+            .background(.gray.opacity(0.05))
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(SyntaxHighlighter.highlightCode(content, language: language, theme: selectedTheme))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .background(selectedTheme.backgroundColor)
+            }
+            .background(selectedTheme.backgroundColor)
+            
+            TextEditor(text: $content)
+                .font(.system(.body, design: .monospaced))
+                .opacity(0.01)
+                .onChange(of: content) { _, _ in
+                    isModified = true
+                }
         }
     }
 }

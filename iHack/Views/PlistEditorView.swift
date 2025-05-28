@@ -13,6 +13,10 @@ struct XcodePlistTableView: View {
     let onSave: () -> Void
     let onRestore: () -> Void
     @State private var searchText = ""
+    @State private var showingAddKey = false
+    @State private var newKey = ""
+    @State private var newValue = ""
+    @State private var newValueType: PlistValueType = .string
     
     var filteredKeys: [String] {
         let keys = Array(data.keys).sorted()
@@ -24,6 +28,7 @@ struct XcodePlistTableView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            // Header
             HStack {
                 Text("Key")
                     .font(.system(size: 13, weight: .semibold))
@@ -51,6 +56,83 @@ struct XcodePlistTableView: View {
                 .fill(.separator)
                 .frame(height: 0.5)
             
+            // Add Key Form (when showing)
+            if showingAddKey {
+                VStack(spacing: 12) {
+                    HStack {
+                        Text("Add New Key")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        
+                        Spacer()
+                        
+                        Button("Cancel") {
+                            cancelAddKey()
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.secondary)
+                    }
+                    
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Key")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("Key name", text: $newKey)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(minWidth: 200)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Type")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Picker("Type", selection: $newValueType) {
+                                ForEach(PlistValueType.allCases, id: \.self) { type in
+                                    Text(type.displayName).tag(type)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(minWidth: 80)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Value")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            if newValueType == .boolean {
+                                Picker("Boolean Value", selection: $newValue) {
+                                    Text("YES").tag("YES")
+                                    Text("NO").tag("NO")
+                                }
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: .infinity)
+                            } else {
+                                TextField(newValueType.placeholder, text: $newValue)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                        
+                        VStack(spacing: 4) {
+                            Text("")
+                                .font(.caption)
+                            Button("Add") {
+                                addNewKey()
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.green)
+                            .disabled(newKey.isEmpty)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(.green.opacity(0.05))
+                .border(.green.opacity(0.3))
+            }
+            
+            // Main content
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(filteredKeys, id: \.self) { key in
@@ -74,6 +156,7 @@ struct XcodePlistTableView: View {
                 }
             }
             
+            // Bottom toolbar
             HStack {
                 Button("Save") {
                     onSave()
@@ -87,6 +170,16 @@ struct XcodePlistTableView: View {
                 .buttonStyle(.bordered)
                 .tint(.orange)
                 
+                Button(showingAddKey ? "Cancel Add" : "Add Key") {
+                    if showingAddKey {
+                        cancelAddKey()
+                    } else {
+                        showAddKey()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(showingAddKey ? .red : .green)
+                
                 Spacer()
                 
                 Text("\(filteredKeys.count) items")
@@ -96,6 +189,73 @@ struct XcodePlistTableView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(.gray.opacity(0.05))
+        }
+    }
+    
+    // MARK: - Add Key Functions
+    
+    func showAddKey() {
+        showingAddKey = true
+        newKey = ""
+        newValue = ""
+        newValueType = .string
+    }
+    
+    func cancelAddKey() {
+        showingAddKey = false
+        newKey = ""
+        newValue = ""
+        newValueType = .string
+    }
+    
+    func addNewKey() {
+        guard !newKey.isEmpty else { return }
+        
+        let value: Any
+        switch newValueType {
+        case .string:
+            value = newValue
+        case .number:
+            value = Double(newValue) ?? 0.0
+        case .boolean:
+            value = newValue == "YES"
+        case .array:
+            value = [String]() // Empty array
+        case .dictionary:
+            value = [String: Any]() // Empty dictionary
+        }
+        
+        data[newKey] = value
+        isModified = true
+        cancelAddKey()
+    }
+}
+
+// MARK: - Value Type Enum
+
+enum PlistValueType: String, CaseIterable {
+    case string = "String"
+    case number = "Number"
+    case boolean = "Boolean"
+    case array = "Array"
+    case dictionary = "Dictionary"
+    
+    var displayName: String {
+        return self.rawValue
+    }
+    
+    var placeholder: String {
+        switch self {
+        case .string:
+            return "Enter text value"
+        case .number:
+            return "Enter number (e.g., 1.0)"
+        case .boolean:
+            return "YES or NO"
+        case .array:
+            return "Creates empty array"
+        case .dictionary:
+            return "Creates empty dictionary"
         }
     }
 }
