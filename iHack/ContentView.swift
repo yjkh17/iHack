@@ -575,6 +575,21 @@ struct ContentView: View {
         }
     }
     
+    func getFileIcon(for url: URL) -> NSImage? {
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+    
+    func getFileType(for url: URL) -> String {
+        do {
+            let resourceValues = try url.resourceValues(forKeys: [.typeIdentifierKey, .localizedTypeDescriptionKey])
+            if let typeIdentifier = resourceValues.typeIdentifier {
+                return typeIdentifier
+            }
+        } catch {
+            return ""
+        }
+        return ""
+    }
 }
 
 // MARK: - Supporting Views
@@ -586,22 +601,38 @@ struct AppContentRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
-                .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
-                .frame(width: 20)
-
-            Text(item.name)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            if item.isPlist {
-                Button("Edit") {
-                    onSelect(item)
+            HStack(spacing: 12) {
+                if let icon = getFileIcon(for: item.url) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
+                        .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
+                        .frame(width: 20)
                 }
-                .buttonStyle(.bordered)
-                .tint(.green)
-                .controlSize(.small)
+
+                Text(item.name)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                // File extension display
+                let fileExt = getFileTypeExtension(for: item.url)
+                if !fileExt.isEmpty {
+                    Text(fileExt)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                if item.isPlist {
+                    Button("Edit") {
+                        onSelect(item)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.green)
+                    .controlSize(.small)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -611,6 +642,70 @@ struct AppContentRowView: View {
         .onHover { hovering in
             isHovered = hovering
         }
+    }
+    
+    func getFileTypeExtension(for url: URL) -> String {
+        do {
+            let resourceValues = try url.resourceValues(forKeys: [.typeIdentifierKey, .localizedTypeDescriptionKey])
+            if let typeIdentifier = resourceValues.typeIdentifier {
+                if let preferredExtension = UTType(typeIdentifier)?.preferredFilenameExtension {
+                    return preferredExtension
+                }
+                
+                switch typeIdentifier {
+                case "com.apple.application-bundle":
+                    return "app"
+                case "com.apple.framework":
+                    return "framework"
+                case "com.apple.bundle":
+                    return "bundle"
+                case "com.apple.kernel-extension":
+                    return "kext"
+                case "public.executable":
+                    return "exec"
+                case "public.unix-executable":
+                    return "unix"
+                default:
+                    break
+                }
+            }
+        } catch {
+            return getFileExtension(from: url.lastPathComponent)
+        }
+        
+        return getFileExtension(from: url.lastPathComponent)
+    }
+
+    func getFileExtension(from fileName: String) -> String {
+        let url = URL(fileURLWithPath: fileName)
+        let pathExtension = url.pathExtension
+        
+        if !pathExtension.isEmpty {
+            return pathExtension
+        }
+        
+        if let dotIndex = fileName.lastIndex(of: ".") {
+            let extensionStartIndex = fileName.index(after: dotIndex)
+            let manualExtension = String(fileName[extensionStartIndex...])
+            
+            if manualExtension != fileName && !manualExtension.isEmpty {
+                return manualExtension
+            }
+        }
+        
+        let lowercaseFileName = fileName.lowercased()
+        
+        if fileName == "PkgInfo" { return "pkginfo" }
+        if fileName == "CodeResources" { return "xml" }
+        if fileName.hasPrefix("._") { return "resource" }
+        if lowercaseFileName.contains("executable") { return "exec" }
+        
+        if fileName.hasSuffix(".app") { return "app" }
+        if fileName.hasSuffix(".framework") { return "framework" }
+        if fileName.hasSuffix(".bundle") { return "bundle" }
+        if fileName.hasSuffix(".kext") { return "kext" }
+        
+        return ""
     }
 }
 

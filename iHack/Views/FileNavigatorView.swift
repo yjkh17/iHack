@@ -6,6 +6,92 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+import AppKit
+
+// Function to get file icon from system
+func getFileIcon(for url: URL) -> NSImage? {
+    return NSWorkspace.shared.icon(forFile: url.path)
+}
+
+// File type detection functions
+
+func getFileTypeExtension(for url: URL) -> String {
+    do {
+        // Try to get the file type using system APIs
+        let resourceValues = try url.resourceValues(forKeys: [.typeIdentifierKey, .localizedTypeDescriptionKey])
+        
+        if let typeIdentifier = resourceValues.typeIdentifier {
+            // Convert UTI to file extension
+            if let preferredExtension = UTType(typeIdentifier)?.preferredFilenameExtension {
+                return preferredExtension
+            }
+            
+            // Handle special cases based on UTI
+            switch typeIdentifier {
+            case "com.apple.application-bundle":
+                return "app"
+            case "com.apple.framework":
+                return "framework"
+            case "com.apple.bundle":
+                return "bundle"
+            case "com.apple.kernel-extension":
+                return "kext"
+            case "public.executable":
+                return "exec"
+            case "public.unix-executable":
+                return "unix"
+            default:
+                break
+            }
+        }
+    } catch {
+        // Fall back to filename-based detection
+        return getFileExtension(from: url.lastPathComponent)
+    }
+    
+    return getFileExtension(from: url.lastPathComponent)
+}
+
+func getFileExtension(from fileName: String) -> String {
+    // First try to get extension from URL pathExtension
+    let url = URL(fileURLWithPath: fileName)
+    let pathExtension = url.pathExtension
+    
+    // If pathExtension is not empty, use it
+    if !pathExtension.isEmpty {
+        return pathExtension
+    }
+    
+    // If no extension found, try manual parsing
+    if let dotIndex = fileName.lastIndex(of: ".") {
+        let extensionStartIndex = fileName.index(after: dotIndex)
+        let manualExtension = String(fileName[extensionStartIndex...])
+        
+        // Make sure we didn't get the whole filename
+        if manualExtension != fileName && !manualExtension.isEmpty {
+            return manualExtension
+        }
+    }
+    
+    // Try to detect common file types without extensions
+    let lowercaseFileName = fileName.lowercased()
+    
+    // Check for common executable files
+    if fileName == "PkgInfo" { return "pkginfo" }
+    if fileName == "CodeResources" { return "xml" }
+    if fileName.hasPrefix("._") { return "resource" }
+    if lowercaseFileName.contains("executable") { return "exec" }
+    
+    // For .app bundles and other known types
+    if fileName.hasSuffix(".app") { return "app" }
+    if fileName.hasSuffix(".framework") { return "framework" }
+    if fileName.hasSuffix(".bundle") { return "bundle" }
+    if fileName.hasSuffix(".kext") { return "kext" }
+    
+    // Return empty string if no extension can be determined
+    return ""
+}
 
 struct XcodeFileRowView: View {
     @ObservedObject var item: AppContentItem
@@ -51,16 +137,30 @@ struct XcodeFileRowView: View {
             }
             
             // File icon
-            Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
-                .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
-                .font(.system(size: 14))
-                .frame(width: 16)
+            if let icon = getFileIcon(for: item.url) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 16, height: 16)
+            } else {
+                Image(systemName: item.isDirectory ? "folder.fill" : (item.isPlist ? "doc.text.fill" : "doc.fill"))
+                    .foregroundColor(item.isDirectory ? .blue : (item.isPlist ? .green : .secondary))
+                    .font(.system(size: 14))
+                    .frame(width: 16, height: 16)
+            }
             
             // File name
             Text(item.name)
                 .font(.system(size: 13))
                 .foregroundColor(isSelected ? .white : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            
+            // File extension display
+            let fileExt = getFileTypeExtension(for: item.url)
+            if !fileExt.isEmpty {
+                Text(fileExt)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(isSelected ? .white.opacity(0.7) : .secondary)
+            }
             
             Spacer()
         }
