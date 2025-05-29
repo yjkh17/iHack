@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - Data Models
 
-struct CarAsset: Identifiable {
+struct CarAsset: Identifiable, Hashable {
     let id = UUID()
     let name: String
     let type: AssetType
@@ -13,6 +13,28 @@ struct CarAsset: Identifiable {
     let thumbnail: NSImage?
     let isIconSet: Bool
     let iconSetVariants: [String]
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(type)
+        hasher.combine(size)
+        hasher.combine(scale)
+        hasher.combine(url)
+        hasher.combine(isIconSet)
+        hasher.combine(iconSetVariants)
+    }
+    
+    static func == (lhs: CarAsset, rhs: CarAsset) -> Bool {
+        return lhs.id == rhs.id &&
+               lhs.name == rhs.name &&
+               lhs.type == rhs.type &&
+               lhs.size == rhs.size &&
+               lhs.scale == rhs.scale &&
+               lhs.url == rhs.url &&
+               lhs.isIconSet == rhs.isIconSet &&
+               lhs.iconSetVariants == rhs.iconSetVariants
+    }
     
     init(name: String, type: AssetType, size: String, scale: String, url: URL?, thumbnail: NSImage?) {
         self.name = name

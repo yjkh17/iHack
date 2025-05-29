@@ -24,18 +24,41 @@ class CarFileAnalyzer {
             }
         }
         
-        // Get more accurate analysis using assetutil
-        Task {
-            let assetUtilAssets = await getAssetUtilAnalysis(url)
-            await MainActor.run {
-                info.estimatedAssetCount = "\(assetUtilAssets.count) assets detected via assetutil"
-                info.detectedFileTypes = analyzeAssetTypes(assetUtilAssets)
-                info.compressionInfo = analyzeCompressionTypes(assetUtilAssets)
+        // Use fallback analysis for immediate results
+        info.estimatedAssetCount = estimateAssetCount(in: data)
+        info.detectedFileTypes = detectFileTypes(in: data)
+        info.compressionInfo = analyzeCompression(in: data)
+        
+        return info
+    }
+    
+    static func analyzeCarDataEnhanced(_ data: Data, url: URL) async -> CarFileInfo {
+        var info = CarFileInfo()
+        
+        // File size
+        info.fileSize = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+        
+        // Header analysis
+        if data.count > 16 {
+            let header = data.prefix(16)
+            let headerHex = header.map { String(format: "%02X", $0) }.joined(separator: " ")
+            info.headerInfo = headerHex
+            
+            // Magic number (first 4 bytes)
+            if data.count >= 4 {
+                let magicBytes = data.prefix(4)
+                let magic = magicBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
+                info.magicNumber = "0x\(String(format: "%08X", magic))"
             }
         }
         
-        // Fallback analysis if assetutil fails
-        if info.estimatedAssetCount.isEmpty {
+        let assetUtilAssets = await getAssetUtilAnalysis(url)
+        if !assetUtilAssets.isEmpty {
+            info.estimatedAssetCount = "\(assetUtilAssets.count) assets detected via assetutil"
+            info.detectedFileTypes = analyzeAssetTypes(assetUtilAssets)
+            info.compressionInfo = analyzeCompressionTypes(assetUtilAssets)
+        } else {
+            // Fallback analysis if assetutil fails
             info.estimatedAssetCount = estimateAssetCount(in: data)
             info.detectedFileTypes = detectFileTypes(in: data)
             info.compressionInfo = analyzeCompression(in: data)
@@ -45,34 +68,82 @@ class CarFileAnalyzer {
     }
     
     private static func getAssetUtilAnalysis(_ url: URL) async -> [CarAsset] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["--sdk", "macosx", "assetutil", "--info", url.path]
-        
-        let pipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = errorPipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                return parseAssetUtilOutput(output)
+        return await withCheckedContinuation { continuation in
+            Task.detached {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                process.arguments = ["--sdk", "macosx", "assetutil", "--info", url.path]
+                
+                let pipe = Pipe()
+                let errorPipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = errorPipe
+                
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    
+                    if process.terminationStatus == 0 {
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let output = String(data: data, encoding: .utf8) ?? ""
+                        let assets = parseAssetUtilOutput(output)
+                        continuation.resume(returning: assets)
+                    } else {
+                        continuation.resume(returning: [])
+                    }
+                } catch {
+                    print("AssetUtil analysis failed: \(error)")
+                    continuation.resume(returning: [])
+                }
             }
-        } catch {
-            print("AssetUtil analysis failed: \(error)")
         }
-        
-        return []
     }
     
     private static func parseAssetUtilOutput(_ output: String) -> [CarAsset] {
-        // Basic parsing for analysis purposes
-        return []
+        var assets: [CarAsset] = []
+        
+        if let jsonData = output.data(using: .utf8) {
+            do {
+                if let jsonArray = try JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
+                    for item in jsonArray {
+                        guard let assetType = item["AssetType"] as? String else { continue }
+                        
+                        let name = item["Name"] as? String ?? "Unknown Asset"
+                        let sizeOnDisk = item["SizeOnDisk"] as? Int ?? 0
+                        let scale = item["Scale"] as? Int ?? 1
+                        
+                        let carAssetType: CarAsset.AssetType = {
+                            switch assetType {
+                            case "Icon Image", "Image", "MultiSized Image":
+                                return .image
+                            case "Vector":
+                                return .pdf
+                            default:
+                                return .data
+                            }
+                        }()
+                        
+                        let scaleString = scale > 1 ? "@\(scale)x" : "@1x"
+                        let sizeString = sizeOnDisk > 0 ? ByteCountFormatter.string(fromByteCount: Int64(sizeOnDisk), countStyle: .file) : "Unknown"
+                        
+                        let asset = CarAsset(
+                            name: name,
+                            type: carAssetType,
+                            size: sizeString,
+                            scale: scaleString,
+                            url: nil,
+                            thumbnail: nil
+                        )
+                        
+                        assets.append(asset)
+                    }
+                }
+            } catch {
+                print("Failed to parse JSON: \(error)")
+            }
+        }
+        
+        return assets
     }
     
     private static func analyzeAssetTypes(_ assets: [CarAsset]) -> String {

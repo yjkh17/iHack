@@ -6,7 +6,6 @@ import AppKit
 class CarAssetExtractor {
     
     static func extractAssets(from url: URL) async throws -> [CarAsset] {
-        // Create temp directory for extraction
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         
@@ -30,7 +29,7 @@ class CarAssetExtractor {
                     size: metadataAsset.size,
                     scale: metadataAsset.scale,
                     url: nil,
-                    thumbnail: CarThumbnailGenerator.createPlaceholderThumbnail(for: metadataAsset.name),
+                    thumbnail: nil,
                     isIconSet: false
                 )
             }
@@ -58,7 +57,22 @@ class CarAssetExtractor {
                 
                 var thumbnail: NSImage?
                 if asset.type == .image {
-                    thumbnail = NSImage(data: asset.data)
+                    // Create thumbnail safely without Sendable issues
+                    thumbnail = createValidatedNSImage(from: asset.data)
+                    if thumbnail != nil {
+                        print(" Validated thumbnail created for \(fileName): \(thumbnail!.size)")
+                    } else {
+                        thumbnail = createValidatedNSImage(fromFile: assetURL)
+                        if thumbnail != nil {
+                            print(" File-based validated thumbnail created for \(fileName): \(thumbnail!.size)")
+                        } else {
+                            print(" Failed to create thumbnail for \(fileName)")
+                            let firstBytes = asset.data.prefix(16)
+                            let hex = firstBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                            print("   - Data signature: \(hex)")
+                            print("   - Data size: \(asset.data.count) bytes")
+                        }
+                    }
                 }
                 
                 let carAsset = CarAsset(
@@ -99,6 +113,10 @@ class CarAssetExtractor {
             ([0x41, 0x54, 0x58, 0x4E], .image, "atx"),
             ([0x48, 0x45, 0x49, 0x43], .image, "heic"),
             ([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63], .image, "heic"),
+            ([0x62, 0x76, 0x78, 0x32], .image, "bvx2"),
+            ([0x64, 0x65, 0x65, 0x70], .image, "deep"),
+            ([0x3C, 0x3F, 0x78, 0x6D, 0x6C], .image, "svg"), // <?xml
+            ([0x3C, 0x73, 0x76, 0x67], .image, "svg"), // <svg
         ]
         
         for (signature, type, ext) in signatures {
@@ -116,7 +134,7 @@ class CarAssetExtractor {
                 if endOffset > startOffset {
                     let assetData = data.subdata(in: startOffset..<endOffset)
                     
-                    if isValidAssetData(assetData, type: type) {
+                    if assetData.count >= 100 {
                         let fileName = "extracted_\(assetIndex).\(ext)"
                         let assetURL = tempDir.appendingPathComponent(fileName)
                         
@@ -124,7 +142,22 @@ class CarAssetExtractor {
                         
                         var thumbnail: NSImage?
                         if type == .image {
-                            thumbnail = NSImage(data: assetData)
+                            // Create thumbnail safely without Sendable issues
+                            thumbnail = createValidatedNSImage(from: assetData)
+                            if thumbnail != nil {
+                                print(" Validated thumbnail created for \(fileName): \(thumbnail!.size)")
+                            } else {
+                                thumbnail = createValidatedNSImage(fromFile: assetURL)
+                                if thumbnail != nil {
+                                    print(" File-based validated thumbnail created for \(fileName): \(thumbnail!.size)")
+                                } else {
+                                    print(" Failed to create thumbnail for \(fileName)")
+                                    let firstBytes = assetData.prefix(16)
+                                    let hex = firstBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                    print("   - Data signature: \(hex)")
+                                    print("   - Data size: \(assetData.count) bytes")
+                                }
+                            }
                         }
                         
                         let asset = CarAsset(
@@ -146,7 +179,52 @@ class CarAssetExtractor {
             }
         }
         
+        let alternativeAssets = try await extractCompressedAssets(from: data, to: tempDir, startIndex: assetIndex)
+        assets.append(contentsOf: alternativeAssets)
+        
         return assets
+    }
+    
+    private static func createValidatedNSImage(from data: Data) -> NSImage? {
+        // Handle SVG files specially
+        if data.starts(with: [0x3C, 0x3F, 0x78, 0x6D, 0x6C]) ||
+           data.starts(with: [0x3C, 0x73, 0x76, 0x67]) ||
+           String(data: data.prefix(100), encoding: .utf8)?.contains("<svg") == true {
+            // Try to create NSImage from SVG data
+            if let nsImage = NSImage(data: data) {
+                return nsImage.isValid ? nsImage : nil
+            }
+            return nil
+        }
+        
+        // Try to create image without UTI hints that might cause issues
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        
+        guard CGImageSourceGetCount(imageSource) > 0 else {
+            return nil
+        }
+        
+        // Create options without problematic UTI hints
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldAllowFloat: false
+        ]
+        
+        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
+            return nil
+        }
+        
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return nsImage.isValid ? nsImage : nil
+    }
+    
+    private static func createValidatedNSImage(fromFile url: URL) -> NSImage? {
+        guard let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return createValidatedNSImage(from: data)
     }
     
     private static func findAssetEndImproved(from start: Data.Index, for type: CarAsset.AssetType, in data: Data) -> Data.Index {
@@ -191,18 +269,31 @@ class CarAssetExtractor {
     }
     
     private static func isValidAssetData(_ data: Data, type: CarAsset.AssetType) -> Bool {
-        guard data.count > 200 else { return false }
+        guard data.count > 100 else { return false }
         
         switch type {
         case .image:
             if data.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
+                // PNG: Check for IHDR chunk after signature
                 return data.count > 20 && data[8...11].elementsEqual([0x49, 0x48, 0x44, 0x52])
             } else if data.starts(with: [0xFF, 0xD8, 0xFF]) {
+                // JPEG: Use our validated creation method instead of direct NSImage
                 let hasEOI = data.contains(Data([0xFF, 0xD9]))
-                let canCreateImage = NSImage(data: data) != nil
+                let canCreateImage = createValidatedNSImage(from: data) != nil
                 return hasEOI && canCreateImage
             }
-            return NSImage(data: data) != nil
+            
+            let canCreateImage = createValidatedNSImage(from: data) != nil
+            if canCreateImage {
+                print("Successfully validated image asset (\(data.count) bytes)")
+            } else {
+                print("Failed to validate image asset (\(data.count) bytes) - possibly compressed")
+                // Debug the failing data
+                let firstBytes = data.prefix(16)
+                let hex = firstBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                print("   - Failed data signature: \(hex)")
+            }
+            return canCreateImage
             
         case .pdf:
             return data.suffix(1024).contains("%%EOF".data(using: .utf8) ?? Data())
@@ -356,7 +447,7 @@ class CarAssetExtractor {
                     size: metaAsset.size,
                     scale: metaAsset.scale,
                     url: nil,
-                    thumbnail: CarThumbnailGenerator.createPlaceholderThumbnail(for: metaAsset.name),
+                    thumbnail: nil,
                     isIconSet: false
                 )
                 
@@ -390,5 +481,84 @@ class CarAssetExtractor {
         }
         
         return assets
+    }
+    
+    private static func extractCompressedAssets(from data: Data, to tempDir: URL, startIndex: Int) async throws -> [CarAsset] {
+        var assets: [CarAsset] = []
+        var assetIndex = startIndex
+        
+        // Look for potential compressed asset boundaries using metadata patterns
+        let patterns = [
+            "deepmap2".data(using: .utf8)!,
+            "lzfse".data(using: .utf8)!,
+            "ARGB".data(using: .utf8)!,
+            "RGB".data(using: .utf8)!,
+        ]
+        
+        for pattern in patterns {
+            var searchStart = data.startIndex
+            
+            while searchStart < data.endIndex {
+                guard let range = data.range(of: pattern, in: searchStart..<data.endIndex) else {
+                    break
+                }
+                
+                // Look for potential compressed data around the pattern
+                let contextStart = max(data.startIndex, range.lowerBound - 2000)
+                let contextEnd = min(data.endIndex, range.upperBound + 5000)
+                let contextData = data.subdata(in: contextStart..<contextEnd)
+                
+                // Try to find any recognizable image data in this context
+                if let imageData = extractImageFromCompressedContext(contextData) {
+                    let thumbnail = createValidatedNSImage(from: imageData)
+                    
+                    let asset = CarAsset(
+                        name: "compressed_\(assetIndex).dat",
+                        type: .image,
+                        size: ByteCountFormatter.string(fromByteCount: Int64(imageData.count), countStyle: .file),
+                        scale: "@1x",
+                        url: tempDir.appendingPathComponent("compressed_\(assetIndex).dat"),
+                        thumbnail: thumbnail,
+                        isIconSet: false
+                    )
+                    
+                    if thumbnail != nil {
+                        assets.append(asset)
+                        assetIndex += 1
+                    }
+                }
+                
+                searchStart = range.upperBound
+            }
+        }
+        
+        return assets
+    }
+    
+    private static func extractImageFromCompressedContext(_ data: Data) -> Data? {
+        // Try different decompression approaches or look for embedded images
+        
+        // Method 1: Look for any embedded standard image signatures
+        let imageSignatures: [[UInt8]] = [
+            [0x89, 0x50, 0x4E, 0x47],
+            [0xFF, 0xD8, 0xFF],
+        ]
+        
+        for signature in imageSignatures {
+            let sigData = Data(signature)
+            if let range = data.range(of: sigData) {
+                let remainingData = data.subdata(in: range.lowerBound..<data.endIndex)
+                if remainingData.count > 500 && NSImage(data: remainingData) != nil {
+                    return remainingData
+                }
+            }
+        }
+        
+        // Method 2: Try to interpret the data as image directly (for some compressed formats)
+        if data.count > 500 && NSImage(data: data) != nil {
+            return data
+        }
+        
+        return nil
     }
 }

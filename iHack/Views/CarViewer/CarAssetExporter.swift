@@ -70,10 +70,13 @@ class CarAssetExporter {
                         }
                     }
                     
+                    let finalExportedCount = exportedCount
+                    let totalAssets = assets.count
+                    
                     await MainActor.run {
                         let alert = NSAlert()
                         alert.messageText = "Export Complete"
-                        alert.informativeText = "Successfully exported \(exportedCount) of \(assets.count) assets"
+                        alert.informativeText = "Successfully exported \(finalExportedCount) of \(totalAssets) assets"
                         alert.alertStyle = .informational
                         alert.runModal()
                     }
