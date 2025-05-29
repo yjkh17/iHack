@@ -378,15 +378,12 @@ struct ContentView: View {
         
         for item in items {
             result.append(item)
-            print("Adding item: \(item.name), isExpanded: \(item.isExpanded), children: \(item.children.count)")
             if item.isDirectory && item.isExpanded {
                 let childItems = getFlattenedItems(item.children)
                 result.append(contentsOf: childItems)
-                print("Added \(childItems.count) children for \(item.name)")
             }
         }
         
-        print("Total flattened items: \(result.count)")
         return result
     }
 
@@ -480,8 +477,6 @@ struct ContentView: View {
     func loadFile(from url: URL, fileType: FileType) {
         selectedFileURL = url
         currentFileType = fileType
-        
-        print("Loading file: \(url.lastPathComponent), type: \(fileType)")
         
         switch fileType {
         case .plist, .xcprivacy:

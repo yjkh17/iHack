@@ -120,7 +120,6 @@ struct XcodeFileRowView: View {
                     Button(action: {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             item.isExpanded.toggle()
-                            print("Tapped \(item.name), isExpanded now: \(item.isExpanded)")
                         }
                     }) {
                         Image(systemName: item.isExpanded ? "chevron.down" : "chevron.right")
@@ -167,7 +166,6 @@ struct XcodeFileRowView: View {
             if item.isDirectory {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     item.isExpanded.toggle()
-                    print("Tapped \(item.name), isExpanded now: \(item.isExpanded)")
                 }
             } else {
                 onSelect(item)
