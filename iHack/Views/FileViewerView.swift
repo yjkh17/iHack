@@ -51,44 +51,58 @@ struct FileViewerView: View {
     let fileType: FileType
     let onSave: () -> Void
     let onRestore: () -> Void
+    let zoomLevel: Double
     
     var body: some View {
-        switch fileType {
-        case .plist:
-            XcodePlistTableView(
-                data: $plistData,
-                isModified: $isModified,
-                onSave: onSave,
-                onRestore: onRestore
-            )
-        case .json:
-            LiveSyntaxHighlightedCodeEditor(
-                content: $fileContent,
-                language: "json",
-                isModified: $isModified,
-                onSave: onSave
-            )
-        case .text:
-            LiveSyntaxHighlightedCodeEditor(
-                content: $fileContent,
-                language: getLanguageType(for: selectedFileURL),
-                isModified: $isModified,
-                onSave: onSave
-            )
-        case .icon:
-            IconViewerView(fileURL: selectedFileURL)
-        case .other:
-            UnsupportedFileView()
+        Group {
+            switch fileType {
+            case .plist, .xcprivacy:
+                XcodePlistTableView(
+                    data: $plistData,
+                    isModified: $isModified,
+                    onSave: onSave,
+                    onRestore: onRestore
+                )
+            case .json:
+                SyntaxHighlightedTextEditor(
+                    content: $fileContent,
+                    language: "json",
+                    isModified: $isModified,
+                    onSave: onSave
+                )
+            case .text:
+                SyntaxHighlightedTextEditor(
+                    content: $fileContent,
+                    language: getLanguageType(for: selectedFileURL),
+                    isModified: $isModified,
+                    onSave: onSave
+                )
+            case .icon:
+                IconViewerView(fileURL: selectedFileURL)
+            case .car:  
+                CarViewerView(fileURL: selectedFileURL)
+            case .other:
+                UnsupportedFileView()
+            }
         }
+        .scaleEffect(zoomLevel)
     }
 }
 
-struct LiveSyntaxHighlightedCodeEditor: View {
+struct SyntaxHighlightedTextEditor: View {
     @Binding var content: String
     let language: String
     @Binding var isModified: Bool
     let onSave: () -> Void
     @State private var selectedTheme: SyntaxTheme = .xcode
+    @State private var showingFindReplace = false
+    @State private var findText = ""
+    @State private var replaceText = ""
+    @State private var currentMatchIndex = 0
+    @State private var totalMatches = 0
+    @State private var caseSensitive = false
+    @State private var useRegex = false
+    @State private var matches: [Range<String.Index>] = []
     
     var lineCount: Int {
         return content.components(separatedBy: .newlines).count
@@ -96,7 +110,6 @@ struct LiveSyntaxHighlightedCodeEditor: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header with controls
             HStack {
                 Text("File Content (\(language.uppercased()))")
                     .font(.headline)
@@ -107,6 +120,12 @@ struct LiveSyntaxHighlightedCodeEditor: View {
                 Text("Lines: \(lineCount)")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                
+                Button("Find") {
+                    showingFindReplace.toggle()
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut("f", modifiers: .command)
                 
                 Picker("Theme", selection: $selectedTheme) {
                     ForEach(SyntaxTheme.allCases, id: \.self) { theme in
@@ -125,9 +144,29 @@ struct LiveSyntaxHighlightedCodeEditor: View {
             .padding()
             .background(.gray.opacity(0.05))
             
-            // Code editor with line numbers
+            if showingFindReplace {
+                FindReplaceView(
+                    findText: $findText,
+                    replaceText: $replaceText,
+                    content: $content,
+                    isModified: $isModified,
+                    currentMatchIndex: $currentMatchIndex,
+                    totalMatches: $totalMatches,
+                    caseSensitive: $caseSensitive,
+                    useRegex: $useRegex,
+                    matches: $matches,
+                    onClose: {
+                        showingFindReplace = false
+                        findText = ""
+                        replaceText = ""
+                        matches = []
+                        currentMatchIndex = 0
+                        totalMatches = 0
+                    }
+                )
+            }
+            
             HStack(spacing: 0) {
-                // Line numbers
                 ScrollView {
                     VStack(alignment: .trailing, spacing: 0) {
                         ForEach(1...max(1, lineCount), id: \.self) { lineNumber in
@@ -148,15 +187,217 @@ struct LiveSyntaxHighlightedCodeEditor: View {
                     .fill(.separator)
                     .frame(width: 1)
                 
-                // Single TextEditor with syntax highlighting applied to content
                 TextEditor(text: $content)
                     .font(.system(.body, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .background(selectedTheme.backgroundColor)
                     .onChange(of: content) { _, _ in
                         isModified = true
+                        if showingFindReplace && !findText.isEmpty {
+                            updateMatches()
+                        }
                     }
             }
+        }
+        .onChange(of: findText) { _, _ in
+            updateMatches()
+        }
+        .onChange(of: caseSensitive) { _, _ in
+            updateMatches()
+        }
+        .onChange(of: useRegex) { _, _ in
+            updateMatches()
+        }
+    }
+    
+    private func updateMatches() {
+        guard !findText.isEmpty else {
+            matches = []
+            totalMatches = 0
+            currentMatchIndex = 0
+            return
+        }
+        
+        let searchOptions: String.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
+        matches = []
+        
+        if useRegex {
+            do {
+                let regex = try NSRegularExpression(pattern: findText, options: caseSensitive ? [] : [.caseInsensitive])
+                let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+                let results = regex.matches(in: content, range: nsRange)
+                
+                matches = results.compactMap { result in
+                    Range(result.range, in: content)
+                }
+            } catch {
+                matches = findLiteralMatches(searchOptions: searchOptions)
+            }
+        } else {
+            matches = findLiteralMatches(searchOptions: searchOptions)
+        }
+        
+        totalMatches = matches.count
+        currentMatchIndex = totalMatches > 0 ? 1 : 0
+    }
+    
+    private func findLiteralMatches(searchOptions: String.CompareOptions) -> [Range<String.Index>] {
+        var results: [Range<String.Index>] = []
+        var searchRange = content.startIndex..<content.endIndex
+        
+        while let range = content.range(of: findText, options: searchOptions, range: searchRange) {
+            results.append(range)
+            searchRange = range.upperBound..<content.endIndex
+        }
+        
+        return results
+    }
+}
+
+struct FindReplaceView: View {
+    @Binding var findText: String
+    @Binding var replaceText: String
+    @Binding var content: String
+    @Binding var isModified: Bool
+    @Binding var currentMatchIndex: Int
+    @Binding var totalMatches: Int
+    @Binding var caseSensitive: Bool
+    @Binding var useRegex: Bool
+    @Binding var matches: [Range<String.Index>]
+    let onClose: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    
+                    TextField("Find", text: $findText)
+                        .textFieldStyle(.plain)
+                        .onSubmit {
+                            findNext()
+                        }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.gray.opacity(0.2))
+                .cornerRadius(6)
+                
+                Button(action: findPrevious) {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.bordered)
+                .disabled(totalMatches == 0)
+                .controlSize(.small)
+                
+                Button(action: findNext) {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.bordered)
+                .disabled(totalMatches == 0)
+                .controlSize(.small)
+                .keyboardShortcut(.return, modifiers: [])
+                
+                Text(totalMatches > 0 ? "\(currentMatchIndex)/\(totalMatches)" : "0/0")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(minWidth: 40)
+                
+                Spacer()
+                
+                Button("✕") {
+                    onClose()
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+            
+            HStack {
+                HStack {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    
+                    TextField("Replace", text: $replaceText)
+                        .textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.gray.opacity(0.2))
+                .cornerRadius(6)
+                
+                Button("Replace") {
+                    replaceCurrent()
+                }
+                .buttonStyle(.bordered)
+                .disabled(totalMatches == 0)
+                .controlSize(.small)
+                
+                Button("Replace All") {
+                    replaceAll()
+                }
+                .buttonStyle(.bordered)
+                .disabled(totalMatches == 0)
+                .controlSize(.small)
+                
+                Spacer()
+                
+                Toggle("Aa", isOn: $caseSensitive)
+                    .help("Case Sensitive")
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                
+                Toggle(".*", isOn: $useRegex)
+                    .help("Use Regular Expression")
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+            }
+        }
+        .padding()
+        .background(.regularMaterial)
+        .cornerRadius(8)
+        .padding(.horizontal)
+        .shadow(radius: 4)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            }
+        }
+    }
+    
+    private func findNext() {
+        guard totalMatches > 0 else { return }
+        currentMatchIndex = currentMatchIndex < totalMatches ? currentMatchIndex + 1 : 1
+    }
+    
+    private func findPrevious() {
+        guard totalMatches > 0 else { return }
+        currentMatchIndex = currentMatchIndex > 1 ? currentMatchIndex - 1 : totalMatches
+    }
+    
+    private func replaceCurrent() {
+        guard totalMatches > 0, currentMatchIndex > 0, currentMatchIndex <= matches.count else { return }
+        
+        let matchRange = matches[currentMatchIndex - 1]
+        content.replaceSubrange(matchRange, with: replaceText)
+        isModified = true
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        }
+    }
+    
+    private func replaceAll() {
+        guard totalMatches > 0 else { return }
+        
+        for match in matches.reversed() {
+            content.replaceSubrange(match, with: replaceText)
+        }
+        
+        isModified = true
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
         }
     }
 }

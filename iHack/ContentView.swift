@@ -30,6 +30,7 @@ struct ContentView: View {
     @State private var selectedApp: AppBundle?
     @State private var appContents: [AppContentItem] = []
     @State private var refreshTrigger = false
+    @State private var zoomLevel: Double = 1.0
 
     var body: some View {
         Group {
@@ -146,7 +147,8 @@ struct ContentView: View {
                                 isModified: $isModified,
                                 fileType: currentFileType,
                                 onSave: saveFile,
-                                onRestore: restoreFromBackup
+                                onRestore: restoreFromBackup,
+                                zoomLevel: zoomLevel
                             )
                         }
                     }
@@ -349,7 +351,7 @@ struct ContentView: View {
                     depth: depth
                 )
                 
-                if isDirectory && depth < 4 {
+                if isDirectory {
                     item.children = scanDirectory(itemURL, depth: depth + 1)
                 }
                 
@@ -482,7 +484,7 @@ struct ContentView: View {
         print("Loading file: \(url.lastPathComponent), type: \(fileType)")
         
         switch fileType {
-        case .plist:
+        case .plist, .xcprivacy:
             loadPlistFile(from: url)
         case .json, .text:
             loadTextFile(from: url)
@@ -491,6 +493,11 @@ struct ContentView: View {
             plistData = [:]
             fileContent = ""
             statusMessage = "Loaded icon: \(url.lastPathComponent)"
+            isModified = false
+        case .car:  
+            plistData = [:]
+            fileContent = ""
+            statusMessage = "Loaded Asset Catalog: \(url.lastPathComponent)"
             isModified = false
         case .other:
             plistData = [:]
@@ -570,6 +577,15 @@ struct ContentView: View {
                                         statusMessage = "Binary provisioning profile: \(url.lastPathComponent)"
                                     }
                                 }
+                            } else if url.pathExtension.lowercased() == "xcprivacy" {
+                                // Privacy Manifest files are XML-based
+                                if let xmlContent = String(data: data, encoding: .utf8) {
+                                    fileContent = xmlContent
+                                    statusMessage = "Loaded Privacy Manifest: \(url.lastPathComponent)"
+                                } else {
+                                    fileContent = "[Privacy Manifest (.xcprivacy) - XML Format]\n\nFile size: \(data.count) bytes\n\nThis is a Privacy Manifest file that declares an app's privacy practices.\n\nContent typically includes:\n- Privacy tracking domains\n- Privacy accessed API types\n- Privacy collection purposes\n- Privacy tracking enabled status\n\nThis file should be readable as XML but appears to have encoding issues."
+                                    statusMessage = "Privacy Manifest with encoding issues: \(url.lastPathComponent)"
+                                }
                             } else {
                                 fileContent = "[Binary or unsupported text encoding]\n\nFile size: \(data.count) bytes\n\nThis file may be in binary format or use an unsupported text encoding."
                                 statusMessage = "Binary file detected: \(url.lastPathComponent)"
@@ -592,11 +608,11 @@ struct ContentView: View {
         guard let url = selectedFileURL else { return }
         
         switch currentFileType {
-        case .plist:
+        case .plist, .xcprivacy:
             savePlistFile(to: url)
         case .json, .text:
             saveTextFile(to: url)
-        case .icon, .other:
+        case .icon, .other, .car:  
             statusMessage = "Cannot save this file type"
         }
     }
@@ -866,4 +882,3 @@ struct AppContentRowView: View {
 #Preview {
     ContentView()
 }
-
